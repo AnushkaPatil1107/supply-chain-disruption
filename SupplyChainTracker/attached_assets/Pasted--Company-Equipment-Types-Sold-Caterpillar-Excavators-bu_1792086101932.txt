@@ -1,0 +1,18 @@
+| Company | Equipment Types Sold |
+|---|---|
+| Caterpillar | Excavators, bulldozers, wheel loaders, dozers, motor graders, dump trucks, cranes, compactors, mining trucks, telehandlers |
+| Komatsu | Excavators, bulldozers, dump trucks, wheel loaders, dozers, motor graders, compactors, cranes, mining trucks, forestry |
+| Volvo CE | Excavators, mini excavators, wheel loaders, articulated dump trucks, dozers, motor graders, compactors, cranes |
+| JCB | Backhoe loaders, excavators, wheel loaders, telehandlers, dozers, compactors, motor graders, dumpers |
+| SANY | Excavators, cranes, transit mixers, batching plants, boom pumps, piling rigs, motor graders, pavers, milling machines, compactors, mining equipment |
+| XCMG | Mobile cranes, wheel loaders, excavators, road rollers, bulldozers, dump trucks, pavers, milling machines, compactors, telehandlers |
+| Liebherr | Excavators, cranes, wheel loaders, dozers, telehandlers, mining trucks, concrete pumps, pavers, compactors |
+| Zoomlion | Cranes, excavators, boom lifts, scissor lifts, road rollers, bulldozers, wheel loaders, concrete pumps, pavers, dump trucks |
+| HD Hyundai / Develon | Excavators, mini excavators, wheel loaders, articulated dump trucks, dozers, motor graders, compactors, cranes |
+| L&T | Excavators, wheel loaders, backhoe loaders, dozers, dump trucks, motor graders, compactors, cranes, mining equipment |
+| Tata Hitachi | Excavators, backhoe loaders, dump trucks, wheel loaders, mini excavators, dozers, compactors, telehandlers |
+| BEML | Excavators, wheel loaders, backhoe loaders, dozers, dump trucks, motor graders, tunnel boring machines, cranes, road rollers |
+| ACE | Mobile cranes, tower cranes, pick-and-carry cranes, material handling, telehandlers, excavators, wheel loaders, backhoe loaders |
+| Escorts Kubota | Excavators, mini excavators, wheel loaders, backhoe loaders, dozers, compactors, cranes, motor graders |
+| Kobelco | Excavators, wheel loaders, dozers, dump trucks, compactors, cranes, mining equipment, forestry |
+

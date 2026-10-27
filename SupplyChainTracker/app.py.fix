@@ -1,0 +1,889 @@
+import streamlit as st
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.express as px
+import numpy as np
+import time
+import random
+import json
+from datetime import datetime
+import pandas as pd
+from typing import Dict, Any
+
+from simulation import create_sample_chain, PresetScenario
+from sms_notifications import send_disruption_alert, send_solution_notification
+
+# Set page configuration
+st.set_page_config(
+    page_title="Supply Chain Disruption Simulator",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Function to create bar charts
+def create_bar_chart(data: dict, title: str, y_axis: str, categories_enabled: bool = False) -> go.Figure:
+    """
+    Create a bar chart for visualizing supply chain data
+    
+    Args:
+        data (dict): Dictionary with labels as keys and values as data points
+        title (str): Chart title
+        y_axis (str): Label for y-axis
+        categories_enabled (bool): Whether to split chart by equipment categories
+        
+    Returns:
+        go.Figure: Plotly figure object
+    """
+    def truncate_data(data_dict, max_items):
+        # Sort by value (descending) and take the top items
+        sorted_items = sorted(data_dict.items(), key=lambda x: x[1], reverse=True)
+        return dict(sorted_items[:max_items])
+    
+    # Limit the number of items to display
+    max_display_items = 15
+    
+    # Only truncate if there are too many items and categories are not enabled
+    if len(data) > max_display_items and not categories_enabled:
+        data = truncate_data(data, max_display_items)
+    
+    if categories_enabled:
+        # Group data by category
+        categories = {}
+        
+        for label, value in data.items():
+            # Check if category is in the label (format: "Name (Category)")
+            if "(" in label and ")" in label:
+                category = label.split("(")[1].split(")")[0]
+                
+                if category not in categories:
+                    categories[category] = {}
+                
+                # Use the name without category for the label
+                name = label.split(" (")[0]
+                categories[category][name] = value
+            else:
+                # If no category found, use "Other"
+                if "Other" not in categories:
+                    categories["Other"] = {}
+                categories["Other"][label] = value
+        
+        # Create figure with a grid of subplots
+        num_categories = len(categories)
+        if num_categories > 6:
+            # Limit to top 6 categories
+            top_categories = sorted(
+                categories.items(),
+                key=lambda x: sum(x[1].values()),
+                reverse=True
+            )[:6]
+            categories = dict(top_categories)
+            num_categories = 6
+        
+        # Choose grid layout based on number of categories
+        if num_categories <= 3:
+            rows, cols = 1, num_categories
+        elif num_categories <= 6:
+            rows, cols = 2, 3
+        else:
+            rows, cols = 3, 3
+        
+        # Create subplot grid
+        fig = make_subplots(
+            rows=rows, 
+            cols=cols,
+            subplot_titles=[cat for cat in categories.keys()],
+            vertical_spacing=0.1
+        )
+        
+        # Add traces for each category
+        i = 1
+        row, col = 1, 1
+        
+        for category, items in categories.items():
+            # Sort items by value for better visualization
+            sorted_items = sorted(items.items(), key=lambda x: x[1], reverse=True)
+            
+            # Limit number of items per category
+            cat_max_items = 8  # Maximum items to show per category
+            if len(sorted_items) > cat_max_items:
+                sorted_items = sorted_items[:cat_max_items]
+            
+            labels, values = zip(*sorted_items) if sorted_items else ([], [])
+            
+            fig.add_trace(
+                go.Bar(
+                    x=labels,
+                    y=values,
+                    name=category
+                ),
+                row=row, col=col
+            )
+            
+            # Update position for next subplot
+            col += 1
+            if col > cols:
+                col = 1
+                row += 1
+            
+            i += 1
+        
+        # Update layout
+        fig.update_layout(
+            title=title,
+            showlegend=False,
+            height=300 * rows,
+            margin=dict(t=50, l=50, r=20, b=50)
+        )
+        
+        # Update y-axis titles
+        for i in range(1, num_categories + 1):
+            fig.update_yaxes(title_text=y_axis, row=(i-1)//cols + 1, col=(i-1)%cols + 1)
+        
+    else:
+        # Create a single bar chart
+        fig = go.Figure()
+        fig.add_trace(
+            go.Bar(
+                x=list(data.keys()),
+                y=list(data.values()),
+                marker_color='rgb(55, 83, 109)'
+            )
+        )
+        
+        # Update layout
+        fig.update_layout(
+            title=title,
+            xaxis=dict(title=''),
+            yaxis=dict(title=y_axis),
+            margin=dict(t=50, l=50, r=20, b=50),
+            height=400
+        )
+    
+    return fig
+
+def main():
+    # Custom CSS
+    st.markdown("""
+    <style>
+        .main-header {
+            font-size: 2.5rem;
+            font-weight: 600;
+            color: #1E88E5;
+        }
+        .sub-header {
+            font-size: 1.5rem;
+            font-weight: 500;
+            color: #424242;
+        }
+        .metric-card {
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 1rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Main title
+    st.markdown('<p class="main-header">Supply Chain Disruption Simulator</p>', unsafe_allow_html=True)
+    st.markdown("A digital twin simulator for gym equipment supply chains")
+    
+    # Sidebar configuration
+    st.sidebar.header("Simulation Settings")
+    
+    # Create preset scenarios
+    presets = {
+        "Baseline": PresetScenario(
+            name="Baseline",
+            description="Standard supply chain with moderate disruption probability",
+            suppliers=10,
+            manufacturers=5,
+            customers=8,
+            base_inventory=100,
+            disruption_probability=0.2
+        ),
+        "Global Pandemic": PresetScenario(
+            name="Global Pandemic",
+            description="Severe disruptions across multiple suppliers with high impact",
+            suppliers=12,
+            manufacturers=5,
+            customers=8,
+            base_inventory=80,
+            disruption_probability=0.7
+        ),
+        "Natural Disaster": PresetScenario(
+            name="Natural Disaster",
+            description="Localized extreme disruptions affecting key suppliers",
+            suppliers=8,
+            manufacturers=4,
+            customers=6,
+            base_inventory=90,
+            disruption_probability=0.5
+        ),
+        "Labor Shortage": PresetScenario(
+            name="Labor Shortage",
+            description="Moderate disruptions due to workforce availability issues",
+            suppliers=10,
+            manufacturers=5,
+            customers=8,
+            base_inventory=100,
+            disruption_probability=0.4
+        ),
+        "Custom": PresetScenario(
+            name="Custom",
+            description="Customize your own scenario parameters",
+            suppliers=8,
+            manufacturers=4,
+            customers=6,
+            base_inventory=100,
+            disruption_probability=0.2
+        )
+    }
+    
+    # Scenario selection
+    selected_preset = st.sidebar.selectbox(
+        "Select Scenario",
+        options=list(presets.keys()),
+        index=0,
+        help="Choose a preset scenario or create your own custom simulation"
+    )
+    
+    selected_preset_data = presets[selected_preset]
+    
+    # Show preset description
+    st.sidebar.markdown(f"**{selected_preset_data.description}**")
+    
+    # Custom parameters if custom selected
+    if selected_preset == "Custom":
+        st.sidebar.subheader("Custom Parameters")
+        
+        num_suppliers = st.sidebar.slider(
+            "Number of Suppliers",
+            min_value=3,
+            max_value=20,
+            value=8,
+            help="How many suppliers in the supply chain"
+        )
+        
+        num_manufacturers = st.sidebar.slider(
+            "Number of Manufacturers",
+            min_value=1,
+            max_value=10,
+            value=4,
+            help="How many manufacturers in the supply chain"
+        )
+        
+        num_customers = st.sidebar.slider(
+            "Number of Customers",
+            min_value=1,
+            max_value=15,
+            value=6,
+            help="How many customers in the supply chain"
+        )
+        
+        base_inventory = st.sidebar.slider(
+            "Base Inventory Level",
+            min_value=50,
+            max_value=200,
+            value=100,
+            step=10,
+            help="Starting inventory levels for suppliers"
+        )
+        
+        disruption_probability = st.sidebar.slider(
+            "Disruption Probability",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.2,
+            step=0.1,
+            help="Probability of disruptions occurring (0.0 - 1.0)"
+        )
+    else:
+        # Use preset values
+        num_suppliers = selected_preset_data.suppliers
+        num_manufacturers = selected_preset_data.manufacturers
+        num_customers = selected_preset_data.customers
+        base_inventory = selected_preset_data.base_inventory
+        disruption_probability = selected_preset_data.disruption_probability
+    
+    # Initialize simulation
+    st.sidebar.subheader("Simulation Status")
+    
+    # Create simulation if needed
+    if 'simulation' not in st.session_state:
+        simulation = create_sample_chain(
+            num_suppliers=num_suppliers,
+            num_manufacturers=num_manufacturers,
+            num_customers=num_customers,
+            base_inventory=base_inventory,
+            disruption_probability=disruption_probability
+        )
+        st.session_state.simulation = simulation
+    else:
+        simulation = st.session_state.simulation
+    
+    # Generate simulation results
+    normal_results = simulation.simulate_normal()
+    disrupted_results = simulation.simulate_with_disruptions()
+    
+    # Calculate impact metrics
+    normal_total = sum(normal_results['manufacturer_production'].values())
+    disrupted_total = sum(disrupted_results['manufacturer_production'].values())
+    
+    production_loss = normal_total - disrupted_total
+    impact_percentage = (production_loss / normal_total * 100) if normal_total > 0 else 0
+    
+    # Display key metrics in sidebar
+    st.sidebar.markdown("**Simulation Metrics:**")
+    
+    # Count active disruptions
+    active_disruptions = sum(1 for d in simulation.disruptions.values() if d is not None)
+    total_suppliers = len(simulation.suppliers)
+    
+    # Metrics display
+    st.sidebar.markdown(f"Suppliers: **{total_suppliers}**")
+    st.sidebar.markdown(f"Active Disruptions: **{active_disruptions}**")
+    st.sidebar.markdown(f"Disruption Rate: **{active_disruptions/total_suppliers:.1%}**")
+    st.sidebar.markdown(f"Production Impact: **{impact_percentage:.1f}%**")
+    
+    # Main dashboard
+    st.header("Supply Chain Dashboard")
+    
+    # Top metrics row
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "Normal Production", 
+            f"{normal_total:,}",
+            help="Expected production without disruptions"
+        )
+    
+    with col2:
+        st.metric(
+            "Actual Production", 
+            f"{disrupted_total:,}",
+            delta=f"-{production_loss:,}",
+            delta_color="inverse",
+            help="Actual production with current disruptions"
+        )
+    
+    with col3:
+        st.metric(
+            "Active Disruptions", 
+            f"{active_disruptions}/{total_suppliers}",
+            help="Number of suppliers currently experiencing disruptions"
+        )
+    
+    with col4:
+        st.metric(
+            "Impact Percentage", 
+            f"{impact_percentage:.1f}%",
+            help="Percentage reduction in production due to disruptions"
+        )
+    
+    # Tabs for different visualizations
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Production Impact", 
+        "Supplier Analysis", 
+        "Disruptions", 
+        "Mitigation",
+        "AI Agent Insights"
+    ])
+    
+    with tab1:
+        st.subheader("Production Impact by Manufacturer")
+        
+        # Process manufacturer data to compare normal vs disrupted
+        manufacturer_impact = {}
+        for manufacturer, normal_value in normal_results['manufacturer_production'].items():
+            disrupted_value = disrupted_results['manufacturer_production'].get(manufacturer, 0)
+            impact = normal_value - disrupted_value
+            
+            # Only show manufacturers that are impacted
+            if impact > 0:
+                manufacturer_impact[manufacturer] = impact
+        
+        if manufacturer_impact:
+            # Create comparison chart
+            fig = create_bar_chart(
+                manufacturer_impact, 
+                "Production Loss by Manufacturer", 
+                "Units Lost",
+                categories_enabled=True
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No significant production impact detected in the current simulation.")
+    
+    with tab2:
+        st.subheader("Supplier Inventory Analysis")
+        
+        # Extract supplier inventory data
+        supplier_inventory = {supplier.name: supplier.inventory for supplier in simulation.suppliers}
+        
+        # Create visualization
+        fig = create_bar_chart(
+            supplier_inventory, 
+            "Current Inventory by Supplier", 
+            "Inventory Units",
+            categories_enabled=True
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Active Disruptions")
+        
+        # Get current disruptions and format for display
+        active_disruptions = {k: v for k, v in simulation.disruptions.items() if v is not None}
+        
+        if active_disruptions:
+            # Create disruptions table
+            disruption_data = []
+            for supplier, disruption in active_disruptions.items():
+                # Find the category for this supplier
+                supplier_category = next((s.category for s in simulation.suppliers if s.name == supplier), "Unknown")
+                
+                disruption_data.append({
+                    "Supplier": supplier,
+                    "Category": supplier_category,
+                    "Disruption Type": disruption
+                })
+            
+            # Display disruptions in expandable sections
+            for i, disruption in enumerate(disruption_data):
+                with st.expander(f"{disruption['Supplier']} - {disruption['Disruption Type']}"):
+                    st.write(f"**Category:** {disruption['Category']}")
+                    st.write(f"**Issue:** {disruption['Disruption Type']}")
+                    
+                    # Get supplier's current inventory
+                    supplier_obj = next((s for s in simulation.suppliers if s.name == disruption['Supplier']), None)
+                    inventory = supplier_obj.inventory if supplier_obj else "Unknown"
+                    st.write(f"**Current Inventory:** {inventory} units")
+                    
+                    # Solution if available
+                    solution = simulation.solutions.get(disruption['Supplier'], "No solution applied")
+                    st.write(f"**Current Mitigation:** {solution}")
+                    
+                    # Option to notify via SMS about the disruption
+                    phone_number = st.text_input(
+                        "Phone Number for SMS Alert (E.164 format, e.g., +1234567890)",
+                        key=f"phone_disruption_{i}"
+                    )
+                    
+                    # SMS alert button
+                    if st.button("Send Disruption Alert", key=f"btn_alert_{i}"):
+                        if phone_number:
+                            result = send_disruption_alert(
+                                to_phone_number=phone_number,
+                                supplier_name=disruption['Supplier'],
+                                disruption_type=disruption['Disruption Type'],
+                                category=disruption['Category']
+                            )
+                            
+                            if result.get("success"):
+                                st.success("SMS alert sent successfully!")
+                            else:
+                                st.error(f"Failed to send SMS: {result.get('error', 'Unknown error')}")
+                        else:
+                            st.warning("Please enter a valid phone number.")
+        else:
+            st.info("No active disruptions in the current simulation.")
+    
+    with tab4:
+        st.subheader("Apply Mitigation Solutions")
+        
+        # Active disruptions for mitigation
+        active_disruptions = {k: v for k, v in simulation.disruptions.items() if v is not None}
+        
+        if active_disruptions:
+            st.write("Select a supplier to apply mitigation solutions:")
+            
+            # Dropdown to select which supplier to mitigate
+            selected_supplier = st.selectbox(
+                "Supplier with Active Disruption",
+                options=list(active_disruptions.keys()),
+                format_func=lambda x: f"{x} - {simulation.disruptions[x]}",
+                key="supplier_for_mitigation"
+            )
+            
+            # Find supplier category
+            supplier_category = next((s.category for s in simulation.suppliers if s.name == selected_supplier), "Unknown")
+            
+            # Display current disruption details
+            st.write(f"**Current Disruption:** {simulation.disruptions[selected_supplier]}")
+            st.write(f"**Category:** {supplier_category}")
+            
+            # Current solution status
+            current_solution = simulation.solutions.get(selected_supplier, "No solution applied")
+            st.write(f"**Current Solution:** {current_solution}")
+            
+            # Mitigation solutions
+            st.subheader("Available Solutions")
+            
+            solution_options = [
+                "Source from alternative supplier",
+                "Expedite shipment through premium freight",
+                "Implement temporary production change",
+                "Activate emergency supply contract",
+                "Utilize inventory reserves",
+                "Employ local manufacturing capacity",
+                "Implement JIT (Just-In-Time) ordering"
+            ]
+            
+            selected_solution = st.selectbox(
+                "Select a solution to implement",
+                options=solution_options,
+                key="solution_selector"
+            )
+            
+            # Solution impact estimation
+            solution_impacts = {
+                "Source from alternative supplier": {"time": "3-5 days", "cost": "High", "reliability": "Medium"},
+                "Expedite shipment through premium freight": {"time": "1-2 days", "cost": "Very High", "reliability": "High"},
+                "Implement temporary production change": {"time": "5-7 days", "cost": "Medium", "reliability": "Medium"},
+                "Activate emergency supply contract": {"time": "2-4 days", "cost": "High", "reliability": "High"},
+                "Utilize inventory reserves": {"time": "Immediate", "cost": "Low", "reliability": "Limited by reserves"},
+                "Employ local manufacturing capacity": {"time": "3-6 days", "cost": "High", "reliability": "Medium"},
+                "Implement JIT (Just-In-Time) ordering": {"time": "7-14 days", "cost": "Low", "reliability": "Medium"}
+            }
+            
+            # Display solution impact
+            impact = solution_impacts.get(selected_solution, {})
+            cols = st.columns(3)
+            cols[0].metric("Est. Implementation Time", impact.get("time", "Unknown"))
+            cols[1].metric("Cost Impact", impact.get("cost", "Unknown"))
+            cols[2].metric("Reliability", impact.get("reliability", "Unknown"))
+            
+            # Custom notes
+            solution_notes = st.text_area(
+                "Additional Solution Notes",
+                placeholder="Add any specific implementation details or requirements...",
+                key="solution_notes"
+            )
+            
+            # SMS notification option
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                phone_number = st.text_input(
+                    "Phone Number for Solution Notification (E.164 format)",
+                    key="phone_solution"
+                )
+            
+            with col2:
+                send_sms = st.checkbox("Send SMS notification about solution", value=False)
+            
+            # Apply solution button
+            if st.button("Apply Solution", key="apply_solution_btn"):
+                # Update the solution in the simulation
+                simulation.solutions[selected_supplier] = selected_solution
+                
+                if solution_notes:
+                    simulation.solutions[selected_supplier] += f" - {solution_notes}"
+                
+                st.success(f"Solution applied to {selected_supplier}!")
+                
+                # Send SMS if requested
+                if send_sms and phone_number:
+                    result = send_solution_notification(
+                        to_phone_number=phone_number,
+                        supplier_name=selected_supplier,
+                        solution=selected_solution,
+                        category=supplier_category
+                    )
+                    
+                    if result.get("success"):
+                        st.success("SMS notification sent successfully!")
+                    else:
+                        st.error(f"Failed to send SMS: {result.get('error', 'Unknown error')}")
+                
+                # Re-run to update the display
+                time.sleep(0.5)
+                st.rerun()
+        else:
+            st.info("No active disruptions requiring mitigation in the current simulation.")
+    
+    with tab5:
+        st.subheader("Advanced AI Agent Analysis")
+        
+        # Import the AI agent
+        from advanced_agent import get_agent_recommendations
+        
+        # Prepare simulation data for the agent
+        agent_data = {
+            "suppliers": simulation.suppliers,
+            "manufacturers": simulation.manufacturers,
+            "disruptions": simulation.disruptions,
+            "solutions": simulation.solutions,
+            "normal_results": normal_results,
+            "disrupted_results": disrupted_results,
+            "simulation": simulation
+        }
+        
+        # Get recommendations from the agent
+        with st.spinner("AI agent analyzing supply chain data..."):
+            analysis_results = get_agent_recommendations(agent_data)
+        
+        # Display executive summary
+        st.markdown("### AI Analysis Summary")
+        summary = analysis_results.get("summary", {})
+        st.write(f"**{summary.get('headline', 'Supply Chain Analysis')}**")
+        
+        # Display key metrics in a nice format
+        key_metrics = summary.get("key_metrics", {})
+        key_cols = st.columns(4)
+        if key_metrics:
+            key_cols[0].metric("Disruption Rate", key_metrics.get("disruption_rate", "N/A"))
+            key_cols[1].metric("Severity", key_metrics.get("severity", "N/A"))
+            key_cols[2].metric("Critical Bottlenecks", key_metrics.get("critical_bottlenecks", "N/A"))
+            key_cols[3].metric("Resilience Score", summary.get("resilience_score", "N/A"))
+        
+        # Display top insights
+        st.markdown("### Key Insights")
+        insights = summary.get("top_insights", [])
+        if insights:
+            for i, insight in enumerate(insights):
+                st.markdown(f"**{i+1}.** {insight}")
+        else:
+            st.info("No key insights available.")
+            
+        # Recommendations section
+        st.markdown("### Priority Recommendations")
+        recommendations = summary.get("priority_recommendations", [])
+        if recommendations:
+            for i, rec in enumerate(recommendations):
+                st.markdown(f"**{i+1}.** {rec}")
+        else:
+            st.info("No priority recommendations available.")
+        
+        # Detailed Analysis Sections
+        with st.expander("Disruption Analysis Details"):
+            disruption_analysis = analysis_results.get("disruption_analysis", {})
+            
+            # Display category impacts
+            st.markdown("#### Category Impacts")
+            category_impacts = disruption_analysis.get("category_impacts", [])
+            if category_impacts:
+                # Convert to DataFrame for better display
+                impact_df = pd.DataFrame(category_impacts)
+                # Select and rename relevant columns
+                if not impact_df.empty and 'category' in impact_df.columns:
+                    display_columns = ['category', 'normal_production', 'disrupted_production', 
+                                       'production_loss', 'impact_percentage', 'severity']
+                    display_columns = [col for col in display_columns if col in impact_df.columns]
+                    
+                    # Rename columns for better display
+                    column_map = {
+                        'category': 'Category',
+                        'normal_production': 'Normal Production',
+                        'disrupted_production': 'Disrupted Production',
+                        'production_loss': 'Production Loss',
+                        'impact_percentage': 'Impact %',
+                        'severity': 'Severity'
+                    }
+                    
+                    renamed_columns = {col: column_map.get(col, col) for col in display_columns}
+                    st.dataframe(impact_df[display_columns].rename(columns=renamed_columns))
+                else:
+                    st.info("Category impact data is not in the expected format.")
+            else:
+                st.info("No category impact data available.")
+            
+            # Display bottlenecks
+            st.markdown("#### Supply Chain Bottlenecks")
+            bottlenecks = disruption_analysis.get("bottlenecks", [])
+            if bottlenecks:
+                # Convert to DataFrame for better display
+                bottleneck_df = pd.DataFrame(bottlenecks)
+                st.dataframe(bottleneck_df)
+            else:
+                st.info("No bottlenecks identified.")
+                
+        # What-if Scenarios
+        with st.expander("What-If Scenario Analysis"):
+            what_if = analysis_results.get("what_if_scenarios", {})
+            
+            # Display scenario selector
+            scenario_options = list(what_if.keys())
+            if scenario_options:
+                selected_scenario = st.selectbox(
+                    "Select a scenario to analyze",
+                    options=scenario_options,
+                    format_func=lambda x: x.replace("_", " ").title(),
+                    key="what_if_scenario_selector"
+                )
+                
+                # Display selected scenario results
+                scenario_data = what_if.get(selected_scenario, {})
+                if scenario_data:
+                    st.json(scenario_data)
+                else:
+                    st.info(f"No data available for the {selected_scenario} scenario.")
+            else:
+                st.info("No what-if scenarios available.")
+                
+        # Cluster Analysis
+        with st.expander("Supplier Cluster Analysis"):
+            cluster_analysis = analysis_results.get("cluster_analysis", {})
+            
+            if cluster_analysis.get("status") == "success":
+                clusters = cluster_analysis.get("clusters", [])
+                
+                if clusters:
+                    st.markdown(f"**{cluster_analysis.get('message', 'Supplier Clusters')}**")
+                    
+                    # Display each cluster
+                    for i, cluster in enumerate(clusters):
+                        st.markdown(f"#### Cluster {i+1}: {cluster.get('characteristics', 'Group')}")
+                        
+                        # Show cluster metrics
+                        cols = st.columns(4)
+                        cols[0].metric("Size", cluster.get("size", "N/A"))
+                        cols[1].metric("Risk Level", cluster.get("risk_level", "N/A"))
+                        cols[2].metric("Avg. Inventory", f"{cluster.get('avg_inventory', 0):.0f}")
+                        cols[3].metric("Avg. Supply Ratio", f"{cluster.get('avg_supply_ratio', 0):.1%}")
+                        
+                        # Show suppliers in this cluster
+                        st.markdown("**Suppliers in this cluster:**")
+                        suppliers_list = cluster.get("suppliers", [])
+                        if suppliers_list:
+                            st.write(", ".join(suppliers_list))
+                        else:
+                            st.info("No suppliers in this cluster.")
+                else:
+                    st.info("No clusters identified in the analysis.")
+            else:
+                st.warning(f"Cluster analysis status: {cluster_analysis.get('status', 'unavailable')}")
+                st.write(cluster_analysis.get("message", "Unable to perform cluster analysis."))
+                
+        # Recovery Forecast
+        with st.expander("Recovery Forecast"):
+            recovery = disruption_analysis.get("recovery_forecast", {})
+            
+            if recovery:
+                st.markdown(f"**Estimated Recovery Time:** {recovery.get('estimated_recovery_time', 'Unknown')}")
+                st.markdown(f"**Confidence:** {recovery.get('confidence', 'Unknown')}")
+                
+                # Display recovery phases
+                phases = recovery.get("recovery_phases", [])
+                if phases:
+                    st.markdown("#### Recovery Phases")
+                    
+                    for phase in phases:
+                        st.markdown(f"**{phase.get('phase', 'Phase')}** ({phase.get('timeline', 'Unknown')})")
+                        
+                        activities = phase.get("activities", [])
+                        if activities:
+                            for activity in activities:
+                                st.markdown(f"- {activity}")
+                else:
+                    st.info("No recovery phases defined.")
+            else:
+                st.info("No recovery forecast available.")
+    
+    # Advanced Simulation Controls
+    st.header("Advanced Simulation Controls")
+    
+    # Allow manual disruption creation
+    with st.expander("Create Manual Disruption"):
+        # Select supplier for disruption
+        available_suppliers = [s.name for s in simulation.suppliers]
+        
+        # Filter suppliers to exclude those that already have disruptions
+        available_suppliers = [s for s in available_suppliers if simulation.disruptions.get(s) is None]
+        
+        if available_suppliers:
+            selected_supplier = st.selectbox(
+                "Select Supplier to Disrupt",
+                options=available_suppliers,
+                key="manual_disruption_supplier"
+            )
+            
+            # Disruption types
+            disruption_types = [
+                "Supply chain delay",
+                "Production facility shutdown",
+                "Materials shortage",
+                "Transportation issues",
+                "Quality control failure",
+                "Labor shortage",
+                "Natural disaster",
+                "Weather-related delays",
+                "Customs or import delay",
+                "Component shortage"
+            ]
+            
+            disruption_type = st.selectbox(
+                "Select Disruption Type",
+                options=disruption_types,
+                key="manual_disruption_type"
+            )
+            
+            # Disruption severity
+            severity = st.slider(
+                "Disruption Severity",
+                min_value=1,
+                max_value=10,
+                value=5,
+                help="Higher severity causes greater impact",
+                key="disruption_severity"
+            )
+            
+            # Implement disruption
+            if st.button("Create Disruption", key="create_disruption_btn"):
+                # Set the disruption in the simulation
+                simulation.disruptions[selected_supplier] = disruption_type
+                
+                # Adjust the supplier's inventory based on severity
+                supplier_obj = next((s for s in simulation.suppliers if s.name == selected_supplier), None)
+                if supplier_obj:
+                    # Reduce inventory by percentage based on severity
+                    reduction = supplier_obj.inventory * (severity / 10)
+                    supplier_obj.inventory = max(0, int(supplier_obj.inventory - reduction))
+                
+                st.success(f"Disruption created for {selected_supplier}!")
+                
+                # Re-run to update the display
+                time.sleep(0.5)
+                st.rerun()
+        else:
+            st.info("All suppliers already have disruptions. Resolve some disruptions to create new ones.")
+    
+    # Reset simulation
+    if st.button("Reset Simulation", key="reset_simulation_btn"):
+        # Create new simulation
+        if selected_preset != "Custom":
+            simulation = create_sample_chain(
+                num_suppliers=num_suppliers,
+                num_manufacturers=num_manufacturers,
+                num_customers=num_customers,
+                base_inventory=base_inventory,
+                disruption_probability=selected_preset_data.disruption_probability
+            )
+        else:
+            simulation = create_sample_chain(
+                num_suppliers=num_suppliers,
+                num_manufacturers=num_manufacturers,
+                num_customers=num_customers,
+                base_inventory=base_inventory,
+                disruption_probability=0.2
+            )
+        
+        st.success("Simulation reset with new random disruptions.")
+        
+        # Re-run to update the display
+        time.sleep(0.5)
+        st.rerun()
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style="text-align: center">
+        <p>Supply Chain Disruption Simulator | v1.0.0</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
