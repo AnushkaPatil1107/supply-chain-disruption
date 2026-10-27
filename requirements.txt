@@ -1,3 +1,5 @@
 streamlit
 plotly
 twilio
+faker
+scikit-learn
